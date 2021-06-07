@@ -1,121 +1,85 @@
-//一些主要处理的逻辑代码，比如数据解析，引入路由处理
-const querystring = require('querystring')
-const handleBlogRouter = require('./src/router/blog')
-const handleUserRouter = require('./src/router/user')
-const {set, get} = require('./src/db/redis')
+const Koa = require('koa')
+const app = new Koa()
+const views = require('koa-views')
+const json = require('koa-json')
+const onerror = require('koa-onerror')
+const bodyparser = require('koa-bodyparser')
+const logger = require('koa-logger')
+const session = require('koa-generic-session')
+const redisStore = require('koa-redis')
+const path = require('path')
+const fs = require('fs')
+const morgan = require('koa-morgan')
 
-//获取cookie的过期时间
-const getCookieExpires = () => {
-  const d = new Date()
-  d.setTime(d.getTime() + (24 * 60 * 60 * 1000))
-  console.log('d.toGMTString() is', d.toGMTString())
-  return d.toGMTString()
+const index = require('./routes/index')
+const users = require('./routes/users')
+const blog = require('./routes/blog')
+const user = require('./routes/user')
+
+const { REDIS_CONF } = require('./conf/db')
+
+// error handler
+onerror(app)
+
+// middlewares
+app.use(bodyparser({
+  enableTypes:['json', 'form', 'text']
+}))
+app.use(json())
+app.use(logger())
+app.use(require('koa-static')(__dirname + '/public'))
+
+app.use(views(__dirname + '/views', {
+  extension: 'pug'
+}))
+
+// logger
+app.use(async (ctx, next) => {
+  const start = new Date()
+  await next()
+  const ms = new Date() - start
+  console.log(`${ctx.method} ${ctx.url} - ${ms}ms`)
+})
+
+const ENV = process.env.NODE_ENV
+if(ENV !== 'production'){
+  //开发环境、测试环境
+  app.use(morgan('dev'))
+}else{
+  //线上环境
+  const logFileName = path.join(__dirname, 'logs', 'access.log')
+  const writeStream = fs.createWriteStream(logFileName, {
+    flags: 'a'
+  })
+  app.use(morgan('combined', {
+    stream: writeStream
+  }))
 }
 
-//通过promise解析postData
-const getPostData = (req) => {
-  const promise = new Promise((resolve, reject) => {
-    if(req.method !== 'POST') {
-      resolve({})
-      return
-    }
-    if(req.headers['content-type'] !== 'application/json') {
-      resolve({})
-      return
-    }
-    let postData = ''
-    req.on('data', chunk => {
-      postData += chunk.toString()
-    })
-    req.on('end', () => {
-      if(!postData) {
-        resolve({})
-        return
-      }
-      resolve(JSON.parse(postData))
-    })
+//session配置
+app.keys = ['19484dskfjSH_']
+app.use(session({
+  //配置cookie
+  cookie: {
+    path: '/',
+    httpOnly: true,
+    maxAge: 24 * 60 * 60 * 1000
+  },
+  //配置redis
+  store: redisStore({
+    all: `${REDIS_CONF.host}:${REDIS_CONF.port}` //暂时写死本地的redis server
   })
-  return promise
-}
+}))
 
-const serverHandle = (req, res) => {
-  res.setHeader('Content-type', 'application/json')
-  //获取path
-  const url = req.url
-  req.path = url.split('?')[0]
+// routes
+app.use(index.routes(), index.allowedMethods())
+app.use(users.routes(), users.allowedMethods())
+app.use(blog.routes(), blog.allowedMethods())
+app.use(user.routes(), user.allowedMethods())
 
-  //解析query
-  req.query = querystring.parse(url.split('?')[1])
+// error-handling
+app.on('error', (err, ctx) => {
+  console.error('server error', err, ctx)
+});
 
-  //解析cookie
-  req.cookie = {}
-  const cookieStr = req.headers.cookie || ''
-  cookieStr.split(';').forEach(item => {
-    if(!item) {
-      return
-    }
-    const arr = item.split('=')
-    const key = arr[0].trim()
-    const val = arr[1].trim()
-    req.cookie[key] = val
-  })
-  console.log('req.cookie:',req.cookie);
-
-  //解析session
-  let needSetCookie = false
-  let userId = req.cookie.userid
-  if(!userId) {
-    needSetCookie = true
-    userId = `${Date.now()}_${Math.random()}`
-    // 初始化 redis 中的 session 值
-    set(userId, {})
-  }
-  req.sessionId = userId
-  get(req.sessionId).then(sessionData => {
-    if(sessionData == null) {
-      // 初始化 redis 中的 session 值
-      set(req.sessionId, {})
-      // 初始化 session 值
-      req.session = {}
-    } else {
-      // 设置 session 值
-      req.session = sessionData
-    }
-    // post data
-    return getPostData(req)//解析postData
-  }).then(postData => {
-    req.body = postData
-    //处理blog路由
-    const blogResult = handleBlogRouter(req, res)
-    if(blogResult) {
-      // console.log(blogResult)
-      blogResult.then(blogData => {
-        if(needSetCookie) {
-          res.setHeader('Set-Cookie', `userid=${userId}; path=/; httpOnly;expires=${getCookieExpires()}`)
-        }
-        res.end(JSON.stringify(blogData))
-      })
-      return
-    }
-
-    //处理user路由
-    const userResult = handleUserRouter(req, res)
-    if(userResult) {
-      userResult.then(userData => {
-        if(needSetCookie) {
-          res.setHeader('Set-Cookie', `userid=${userId}; path=/; httpOnly;expires=${getCookieExpires()}`)
-        }
-        res.end(JSON.stringify(userData))
-      })
-      return
-    }
-    //未命中路由，返回404
-    res.writeHead(404, {"Content-type": "text/plain"})
-    res.write("404 Not Found\n")
-    res.end()
-  })
-}
-
-module.exports = serverHandle
-
-//process.env.NODE_ENV
+module.exports = app
