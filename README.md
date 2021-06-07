@@ -1,5 +1,5 @@
 # blog-web-test
-learn build blog webserver api
+learn build blog webserver api, have some problems about layout and security.
 
 1、Install MySQL; set MySQL's connection to 127.0.0.1:3306;set user and password;import mysql dump data;
 
